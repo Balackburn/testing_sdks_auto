@@ -666,7 +666,9 @@ select_device_automatically() {
         local temp_list
         temp_list=$(ipsw download ipsw --device-list --version "${IOS_VERSION}" 2>/dev/null || true)
         if [ -n "${temp_list}" ]; then
-            device_list=$(echo "${temp_list}" | grep "iPhone" || true | sort -V | tail -1 | grep -o 'iPhone[0-9]*,[0-9]*' || true)
+            # Filter to arm64 devices only (iPhone6,1+ = iPhone 6 = A8 = arm64 minimum)
+            # Excludes iPhone5,x (armv7s/32-bit) and iPhone4,x (armv7/32-bit)
+            device_list=$(echo "${temp_list}" | grep -oE 'iPhone[6-9][0-9]*,[0-9]+' || true | sort -V | tail -1)
         fi
     fi
 
@@ -695,17 +697,24 @@ select_device_automatically() {
         elif [ "${major_version}" -ge 10 ]; then
             IPSW_DEVICE="iPhone9,4"
         else
-            # iOS 9.x
+            # iOS 9.x — iPhone 6s (A9, arm64). iPhone5,x/4,x are armv7s/32-bit
+            # and would produce a cache incompatible with modern Theos toolchains.
             IPSW_DEVICE="iPhone8,2"
         fi
         log_info "Defaulting to ${IPSW_DEVICE} for iOS ${major_version}"
     else
-        IPSW_DEVICE=$(echo "${device_list}" | head -1)
-        if [ -z "${IPSW_DEVICE}" ]; then
-            log_warn "Failed to extract device ID, defaulting to iPhone16,2"
-            IPSW_DEVICE="iPhone16,2"
+        # From the filtered list, verify it's arm64 (model number >= iPhone6,1)
+        local raw_device
+        raw_device=$(echo "${device_list}" | head -1)
+        local model_major
+        model_major=$(echo "${raw_device}" | grep -oE 'iPhone([0-9]+),' | grep -oE '[0-9]+' || echo "0")
+        if [ "${model_major}" -lt 6 ]; then
+            log_warn "Auto-selected ${raw_device} is a 32-bit device — overriding to arm64 fallback"
+            local major_version
+            major_version=$(echo "${IOS_VERSION}" | cut -d. -f1)
+            IPSW_DEVICE="iPhone8,2"  # iPhone 6s Plus, arm64, supports iOS 9+
         else
-            log_success "Auto-selected device: ${IPSW_DEVICE}"
+            IPSW_DEVICE="${raw_device}"
         fi
     fi
 
@@ -800,39 +809,65 @@ find_dyld_shared_cache() {
     # armv7s / armv7 (iOS 9–10).  We try all so older devices are handled.
     local dsc_candidates=("dyld_shared_cache_arm64e" "dyld_shared_cache_arm64" "dyld_shared_cache_armv7s" "dyld_shared_cache_armv7")
 
-    # Corresponding arch flags for ipsw extract --dyld
-    # ipsw has a built-in firmware key database and is the ONLY reliable method
-    # for old IPSWs (iOS 9–12) whose root filesystems are encrypted img3/img4
-    # images that hdiutil cannot mount.  Try every arch — ipsw will skip ones
-    # that don't exist in the IPSW and return non-zero.
-    local arch_candidates=("arm64e" "arm64" "armv7s" "armv7")
+    # Temp file to capture ipsw stderr so we can log the real error if all methods fail
+    local ipsw_err_log
+    ipsw_err_log=$(mktemp /tmp/ipsw_err_XXXX.log)
+    TEMP_DIRS+=("${ipsw_err_log}")
 
-    # Method 1: ipsw extract --dyld — try each arch until one succeeds
-    log_info "Attempting ipsw extract --dyld (tries all arch variants)..."
+    # Helper: scan dyld_extract_dir for any primary cache file
+    _find_extracted_cache() {
+        local candidate
+        for candidate in "${dsc_candidates[@]}"; do
+            local hit
+            hit=$(find "${dyld_extract_dir}" \
+                -name "${candidate}" \
+                -not -name "*.dyldlinkedit" \
+                -not -name "*.dylddata" \
+                -not -name "*.symbols" \
+                -not -name "*.[0-9]*" \
+                -type f 2>/dev/null | head -1)
+            if [ -n "${hit}" ]; then
+                log_success "Found dyld cache (${candidate}): ${hit}"
+                DYLD_CACHE_PATH="${hit}"
+                RESOLVED_DSC_BASENAME="${candidate}"
+                return 0
+            fi
+        done
+        return 1
+    }
+
+    # ── Method 1a: ipsw extract --dyld, no arch (auto-detect) ────────────────
+    # For old IPSWs (iOS 9–13), passing --dyld-arch causes ipsw to hang or skip
+    # if that arch isn't present. Auto-detect mode is tried first.
+    # Timeout: 120s — old IPSW extraction should complete well within that.
+    log_info "Attempting ipsw extract --dyld (auto-detect arch)..."
+    if timeout 120 ipsw extract --dyld -o "${dyld_extract_dir}" "${ipsw_file}" 2>"${ipsw_err_log}"; then
+        if _find_extracted_cache; then
+            rm -f "${ipsw_err_log}"
+            return 0
+        fi
+    fi
+    if [ -s "${ipsw_err_log}" ]; then
+        log_warn "ipsw auto-detect error: $(head -3 "${ipsw_err_log}")"
+    fi
+
+    # ── Method 1b: ipsw extract --dyld, explicit arch variants ───────────────
+    local arch_candidates=("arm64e" "arm64" "armv7s" "armv7")
     local arch
     for arch in "${arch_candidates[@]}"; do
-        log_info "  Trying --dyld-arch ${arch}..."
-        if ipsw extract --dyld --dyld-arch "${arch}" -o "${dyld_extract_dir}" "${ipsw_file}" 2>/dev/null; then
-            local extracted_cache
-            for candidate in "${dsc_candidates[@]}"; do
-                extracted_cache=$(find "${dyld_extract_dir}" \
-                    -name "${candidate}" \
-                    -not -name "*.dyldlinkedit" \
-                    -not -name "*.dylddata" \
-                    -not -name "*.symbols" \
-                    -not -name "*.[0-9]*" \
-                    -type f 2>/dev/null | head -1)
-                if [ -n "${extracted_cache}" ]; then
-                    log_success "Extracted dyld cache (${candidate}, arch=${arch}): ${extracted_cache}"
-                    DYLD_CACHE_PATH="${extracted_cache}"
-                    RESOLVED_DSC_BASENAME="${candidate}"
-                    return 0
-                fi
-            done
+        log_info "  Trying --dyld-arch ${arch} (timeout 120s)..."
+        if timeout 120 ipsw extract --dyld --dyld-arch "${arch}" -o "${dyld_extract_dir}" "${ipsw_file}" 2>"${ipsw_err_log}"; then
+            if _find_extracted_cache; then
+                rm -f "${ipsw_err_log}"
+                return 0
+            fi
+        fi
+        if [ -s "${ipsw_err_log}" ]; then
+            log_warn "  ipsw error (arch=${arch}): $(head -1 "${ipsw_err_log}")"
         fi
     done
     log_warn "ipsw extract --dyld: no cache found for any arch — trying DMG mount method..."
-    log_warn "(Note: encrypted iOS 9–12 images may not be mountable without firmware keys)"
+    log_warn "(iOS 9–12 root filesystems are img4-encrypted; hdiutil mount may also fail)"
 
     # Method 2: Mount DMGs and search for the cache at known paths.
     # Build the list of locations to probe for every candidate basename.
