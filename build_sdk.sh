@@ -427,33 +427,6 @@ sdk_already_exists() {
 # Probe all Xcodes currently installed under /Applications and return the path
 # of the first one whose bundled iOS SDK major matches the required version.
 # Prints the app path to stdout; returns 1 if none found.
-find_installed_xcode() {
-    local required_major
-    required_major=$(echo "${XCODE_VERSION}" | cut -d. -f1)
-
-    # Build candidate list: xcodes-style names first, then the default Xcode.app
-    local candidates=()
-    while IFS= read -r app; do
-        candidates+=("${app}")
-    done < <(find /Applications -maxdepth 1 -name "Xcode*.app" -type d 2>/dev/null | sort -V)
-
-    for app in "${candidates[@]+"${candidates[@]}"}"; do
-        # Read the CFBundleShortVersionString from the bundle
-        local bundled_ver
-        bundled_ver=$(defaults read "${app}/Contents/Info" CFBundleShortVersionString 2>/dev/null || true)
-        [ -z "${bundled_ver}" ] && continue
-
-        local bundled_major
-        bundled_major=$(echo "${bundled_ver}" | cut -d. -f1)
-
-        if [ "${bundled_major}" = "${required_major}" ]; then
-            echo "${app}"
-            return 0
-        fi
-    done
-    return 1
-}
-
 # Shared post-setup: set DEVELOPER_DIR, accept licence, mark whether we own it.
 # $1 = path to Xcode.app   $2 = "owned" | "preinstalled"
 _setup_xcode_app() {
@@ -483,24 +456,10 @@ download_and_extract_xcode() {
         return 0
     fi
 
-    # ── 2. Scan ALL installed Xcodes for a matching major version ────────────
-    #    The GitHub macOS runner ships Xcode pre-installed (e.g. Xcode 16.x on
-    #    macos-15).  If its major version matches what we need we use it
-    #    directly — no Apple login required.
-    log_info "Scanning installed Xcodes for a ${XCODE_VERSION%.*}.x match..."
-    local found_app
-    if found_app=$(find_installed_xcode); then
-        log_success "Found compatible pre-installed Xcode: ${found_app}"
-        log_info    "Using it in place of downloading Xcode ${XCODE_VERSION} (no login needed)."
-        _setup_xcode_app "${found_app}" "preinstalled"
-        return 0
-    fi
-
-    # ── 3. Download via xcodes ────────────────────────────────────────────────
-    #    Run xcodes directly (NOT inside $(...)) so interactive prompts work.
-    #    If XCODES_USERNAME / XCODES_PASSWORD env vars are set xcodes uses them
-    #    silently; otherwise it prompts for credentials as normal.
-    log_info "No pre-installed Xcode ${XCODE_VERSION%.*}.x found — attempting download..."
+    # ── 2. Download via xcodes ────────────────────────────────────────────────
+    # Major-version fuzzy matching is intentionally NOT done here: Xcode 26.0.1
+    # and 26.4 ship different iOS SDKs. An inexact match produces a wrong SDK.
+    log_info "Xcode ${XCODE_VERSION} not found locally — downloading..."
     log_info "Downloading Xcode ${XCODE_VERSION} (this may take a while)..."
 
     set +e
