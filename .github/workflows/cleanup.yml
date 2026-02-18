@@ -1,0 +1,35 @@
+name: Delete All Releases
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  delete:
+    name: Delete all releases & tags
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Delete all releases and tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "Fetching all releases..."
+          RELEASES=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName --jq '.[].tagName')
+
+          if [ -z "$RELEASES" ]; then
+            echo "No releases found."
+            exit 0
+          fi
+
+          COUNT=$(echo "$RELEASES" | wc -l | tr -d ' ')
+          echo "Found ${COUNT} release(s). Deleting..."
+
+          while IFS= read -r TAG; do
+            echo "  Deleting release + tag: ${TAG}"
+            gh release delete "${TAG}" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
+          done <<< "$RELEASES"
+
+          echo "Done. Deleted ${COUNT} release(s)."

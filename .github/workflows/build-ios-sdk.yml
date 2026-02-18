@@ -1,0 +1,303 @@
+##############################################################################
+# build-ios-sdk.yml
+#
+# Builds patched iOS SDK(s) and publishes each one as a GitHub Release asset.
+#
+# TRIGGERS
+#   schedule          – daily at 06:00 UTC; refreshes map + builds new SDKs.
+#   workflow_dispatch – manual; optional ios_version / all inputs.
+#
+# JOBS (in order)
+#   1. fetch   – (Ubuntu) Runs map_sdks.py, commits map if new versions found.
+#   2. prepare – (Ubuntu) Reads map, emits full candidate list as matrix.
+#                No release filtering here — each build job handles its own.
+#   3. build   – (macOS 15) One runner per iOS version, all in parallel.
+#                Step 0: if asset already in release → print "✅ already
+#                released!" and exit success, all build steps are skipped.
+#
+# INPUTS  (workflow_dispatch only)
+#   ios_version – single iOS version string, e.g. "18.2"
+#   all         – boolean; when true every known SDK is targeted.
+#
+# SECRETS  (Settings → Secrets → Actions)
+#   APPLE_ID       – Apple ID e-mail used by xcodes to download Xcode.
+#   APPLE_PASSWORD – Corresponding Apple ID password.
+##############################################################################
+
+name: Build Patched iOS SDK
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+
+  workflow_dispatch:
+    inputs:
+      ios_version:
+        description: >
+          iOS version to build (e.g. 18.2).
+          Ignored when "Build all" is checked.
+        required: false
+        type: string
+      all:
+        description: Build all known iOS SDKs
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # JOB 1 – FETCH
+  # ──────────────────────────────────────────────────────────────────────────
+  fetch:
+    name: Refresh SDK map (map_sdks.py)
+    runs-on: ubuntu-latest
+
+    outputs:
+      map_updated: ${{ steps.run-fetch.outputs.map_updated }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ github.token }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install map_sdks.py dependencies
+        run: pip install requests beautifulsoup4
+
+      - name: Run map_sdks.py
+        id: run-fetch
+        run: |
+          set +e
+          python3 map_sdks.py
+          EXIT_CODE=$?
+          set -e
+
+          if [ "${EXIT_CODE}" -eq 1 ]; then
+            echo "map_updated=true"  >> "$GITHUB_OUTPUT"
+            echo "New SDK versions detected — committing updated map."
+          elif [ "${EXIT_CODE}" -eq 0 ]; then
+            echo "map_updated=false" >> "$GITHUB_OUTPUT"
+            echo "No changes in SDK map."
+          else
+            echo "::error::map_sdks.py exited with unexpected code ${EXIT_CODE}"
+            exit "${EXIT_CODE}"
+          fi
+
+      - name: Commit updated sdk_map.json
+        if: steps.run-fetch.outputs.map_updated == 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add sdk_map.json
+          git commit -m "chore: update sdk_map.json [skip ci]"
+          git push
+
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # JOB 2 – PREPARE
+  #   Reads the map and emits ALL candidate versions as the build matrix.
+  #   No release-existence filtering — each build job checks for itself and
+  #   reports "✅ already released!" individually, giving per-version status.
+  # ──────────────────────────────────────────────────────────────────────────
+  prepare:
+    name: Prepare build matrix
+    needs: fetch
+    runs-on: ubuntu-latest
+
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Build version list
+        id: set-matrix
+        env:
+          INPUT_ALL:         ${{ inputs.all }}
+          INPUT_IOS_VERSION: ${{ inputs.ios_version }}
+          EVENT_NAME:        ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          if [ ! -f sdk_map.json ]; then
+            echo "::error::sdk_map.json not found. The fetch job may have failed."
+            exit 1
+          fi
+
+          ALL_KNOWN_SDKS=$(python3 -c "import json; d=json.load(open('sdk_map.json')); vk=lambda v:[int(x) for x in v.split('.')]; sdks=sorted({v for v in d.values() if v and vk(v)>=[9,3]},key=vk); print(' '.join(sdks))")
+
+          echo "Known iOS SDKs from map: ${ALL_KNOWN_SDKS}"
+
+          # Scheduled + all-flag → every version; manual → respect input.
+          if [ "${EVENT_NAME}" = "schedule" ] || [ "${INPUT_ALL}" = "true" ]; then
+            read -ra VERSIONS <<< "${ALL_KNOWN_SDKS}"
+          elif [ -n "${INPUT_IOS_VERSION}" ]; then
+            VERSIONS=("${INPUT_IOS_VERSION}")
+          else
+            echo "::error::Provide an iOS version or check 'Build all'."
+            exit 1
+          fi
+
+          echo "Versions entering the matrix (${#VERSIONS[@]}):"
+          for ver in "${VERSIONS[@]}"; do echo "  • iOS ${ver}"; done
+
+          JSON=$(printf '%s\n' "${VERSIONS[@]}" | jq -R . | jq -sc .)
+          echo "matrix=${JSON}" >> "$GITHUB_OUTPUT"
+
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # JOB 3 – BUILD
+  #   One macOS 15 runner per iOS version, all running in parallel.
+  #
+  #   Step 0 is the per-version gate:
+  #     • Asset already in release → print "✅ iPhoneOSX.Y already released!"
+  #       set already_released=true, job exits SUCCESS, all build steps skip.
+  #     • Asset not present        → set already_released=false, build runs.
+  # ──────────────────────────────────────────────────────────────────────────
+  build:
+    name: iPhoneOS${{ matrix.ios_version }}.sdk
+    needs: prepare
+
+    runs-on: macos-15
+    timeout-minutes: 360
+
+    strategy:
+      fail-fast: false
+      matrix:
+        ios_version: ${{ fromJson(needs.prepare.outputs.matrix) }}
+
+    env:
+      FASTLANE_SESSION: ${{ secrets.FASTLANE }}
+      FASTLANE_USER: ${{ secrets.APPLE_ID }}
+      GH_TOKEN:        ${{ github.token }}
+      IOS_VERSION:     ${{ matrix.ios_version }}
+
+    steps:
+
+      # ── Step 0: Per-version release check ────────────────────────────────
+      # This is the single authoritative gate. Every version in the matrix
+      # runs this step. If the asset exists the job succeeds immediately
+      # without touching any macOS build tooling.
+      - name: Check if already released
+        id: release-check
+        run: |
+          TAG="iPhoneOS${IOS_VERSION}"
+          ASSET="iPhoneOS${IOS_VERSION}.sdk.tar.xz"
+
+          EXISTING=$(
+            gh release view "${TAG}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json assets \
+              --jq '.assets[].name' \
+              2>/dev/null || true
+          )
+
+          if echo "${EXISTING}" | grep -qxF "${ASSET}"; then
+            echo ""
+            echo "┌─────────────────────────────────────────────────┐"
+            echo "│  ✅  iPhoneOS${IOS_VERSION} already released!         │"
+            echo "└─────────────────────────────────────────────────┘"
+            echo ""
+            echo "Asset '${ASSET}' is already attached to release '${TAG}'."
+            echo "Skipping build — nothing to do."
+            echo "already_released=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "iPhoneOS${IOS_VERSION}: not yet released — starting build."
+            echo "already_released=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Step 1: Checkout ──────────────────────────────────────────────────
+      - name: Checkout repository
+        if: steps.release-check.outputs.already_released != 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      # ── Step 2: Make script executable ───────────────────────────────────
+      - name: Ensure build_sdk.sh is executable
+        if: steps.release-check.outputs.already_released != 'true'
+        run: chmod +x "$GITHUB_WORKSPACE/build_sdk.sh"
+
+      # ── Step 3: Pre-clean ─────────────────────────────────────────────────
+      - name: Remove any leftover local SDK directory
+        if: steps.release-check.outputs.already_released != 'true'
+        run: rm -rf "$GITHUB_WORKSPACE/iPhoneOS${IOS_VERSION}.sdk"
+
+      # ── Step 4: Build ─────────────────────────────────────────────────────
+      - name: Run build_sdk.sh
+        if: steps.release-check.outputs.already_released != 'true'
+        working-directory: ${{ github.workspace }}
+        run: bash build_sdk.sh --ios "${IOS_VERSION}"
+
+      # ── Step 5: Verify SDK directory ─────────────────────────────────────
+      - name: Verify SDK was produced
+        if: steps.release-check.outputs.already_released != 'true'
+        run: |
+          SDK_DIR="$GITHUB_WORKSPACE/iPhoneOS${IOS_VERSION}.sdk"
+          if [ ! -d "${SDK_DIR}" ]; then
+            echo "::error::Expected SDK directory not found: ${SDK_DIR}"
+            exit 1
+          fi
+          echo "SDK size: $(du -sh "${SDK_DIR}" | cut -f1)"
+
+      # ── Step 5a: Check tbd stubs ──────────────────────────────────────────
+      - name: Check tbd stub count
+        if: steps.release-check.outputs.already_released != 'true'
+        run: |
+          SDK_DIR="$GITHUB_WORKSPACE/iPhoneOS${IOS_VERSION}.sdk"
+          TBD_COUNT=$(find "${SDK_DIR}" -name "*.tbd" | wc -l | tr -d ' ')
+          echo "tbd stubs found: ${TBD_COUNT}"
+          if [ "${TBD_COUNT}" -eq 0 ]; then
+            echo "::warning::SDK contains no .tbd stubs. The dyld shared cache may not have been parsed correctly."
+          else
+            echo "::notice::SDK contains ${TBD_COUNT} .tbd stub file(s) — looks complete."
+          fi
+
+      # ── Step 6: Compress ──────────────────────────────────────────────────
+      - name: Compress SDK to tar.xz
+        if: steps.release-check.outputs.already_released != 'true'
+        run: |
+          tar -cJf \
+            "$GITHUB_WORKSPACE/iPhoneOS${IOS_VERSION}.sdk.tar.xz" \
+            -C "$GITHUB_WORKSPACE" \
+            "iPhoneOS${IOS_VERSION}.sdk"
+          echo "Archive size: $(du -sh "$GITHUB_WORKSPACE/iPhoneOS${IOS_VERSION}.sdk.tar.xz" | cut -f1)"
+
+      # ── Step 7: Create release (idempotent) ───────────────────────────────
+      - name: Create GitHub release if absent
+        if: steps.release-check.outputs.already_released != 'true'
+        run: |
+          TAG="iPhoneOS${IOS_VERSION}"
+          if gh release view "${TAG}" --repo "$GITHUB_REPOSITORY" &>/dev/null; then
+            echo "Release '${TAG}' already exists — uploading asset to it."
+          else
+            NOTES="Patched \`iPhoneOS${IOS_VERSION}.sdk\` built automatically from Xcode + IPSW dyld shared cache using the [Theos](https://github.com/theos/sdks) toolchain."$'\n\n'"**Usage:** extract the \`.tar.xz\` and place the \`.sdk\` directory in your Theos SDK folder."
+            gh release create "${TAG}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "iPhoneOS${IOS_VERSION}.sdk" \
+              --notes "${NOTES}" \
+              --latest=false
+          fi
+
+      # ── Step 8: Upload asset ──────────────────────────────────────────────
+      - name: Upload SDK archive to release
+        if: steps.release-check.outputs.already_released != 'true'
+        run: |
+          TAG="iPhoneOS${IOS_VERSION}"
+          ASSET="$GITHUB_WORKSPACE/iPhoneOS${IOS_VERSION}.sdk.tar.xz"
+          gh release upload "${TAG}" "${ASSET}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+          echo "✅ iPhoneOS${IOS_VERSION}.sdk.tar.xz uploaded to release '${TAG}'."
