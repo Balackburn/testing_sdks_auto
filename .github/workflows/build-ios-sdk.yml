@@ -8,7 +8,7 @@
 #   workflow_dispatch – manual; optional ios_version / all inputs.
 #
 # JOBS (in order)
-#   1. fetch   – (Ubuntu) Runs fetch.py, commits map if new versions found.
+#   1. fetch   – (Ubuntu) Runs map_sdks.py, commits map if new versions found.
 #   2. prepare – (Ubuntu) Reads map, emits full candidate list as matrix.
 #                No release filtering here — each build job handles its own.
 #   3. build   – (macOS 15) One runner per iOS version, all in parallel.
@@ -53,7 +53,7 @@ jobs:
   # JOB 1 – FETCH
   # ──────────────────────────────────────────────────────────────────────────
   fetch:
-    name: Refresh SDK map (fetch.py)
+    name: Refresh SDK map (map_sdks.py)
     runs-on: ubuntu-latest
 
     outputs:
@@ -70,14 +70,14 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install fetch.py dependencies
+      - name: Install map_sdks.py dependencies
         run: pip install requests beautifulsoup4
 
-      - name: Run fetch.py
+      - name: Run map_sdks.py
         id: run-fetch
         run: |
           set +e
-          python3 fetch.py 
+          python3 map_sdks.py
           EXIT_CODE=$?
           set -e
 
@@ -88,17 +88,17 @@ jobs:
             echo "map_updated=false" >> "$GITHUB_OUTPUT"
             echo "No changes in SDK map."
           else
-            echo "::error::fetch.py exited with unexpected code ${EXIT_CODE}"
+            echo "::error::map_sdks.py exited with unexpected code ${EXIT_CODE}"
             exit "${EXIT_CODE}"
           fi
 
-      - name: Commit updated xcode_ios_sdk_map.json
+      - name: Commit updated sdk_map.json
         if: steps.run-fetch.outputs.map_updated == 'true'
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add xcode_ios_sdk_map.json
-          git commit -m "chore: update xcode_ios_sdk_map.json [skip ci]"
+          git add sdk_map.json
+          git commit -m "chore: update sdk_map.json [skip ci]"
           git push
 
 
@@ -131,12 +131,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ ! -f xcode_ios_sdk_map.json ]; then
-            echo "::error::xcode_ios_sdk_map.json not found. The fetch job may have failed."
+          if [ ! -f sdk_map.json ]; then
+            echo "::error::sdk_map.json not found. The fetch job may have failed."
             exit 1
           fi
 
-          ALL_KNOWN_SDKS=$(python3 -c "import json; d=json.load(open('xcode_ios_sdk_map.json')); vk=lambda v:[int(x) for x in v.split('.')]; sdks=sorted({r['ios_sdk'] for r in d.get('results',[]) if r.get('ios_sdk') and vk(r['ios_sdk'])>=[9,3]},key=vk); print(' '.join(sdks))")
+          ALL_KNOWN_SDKS=$(python3 -c "import json; d=json.load(open('sdk_map.json')); vk=lambda v:[int(x) for x in v.split('.')]; sdks=sorted({v for v in d.values() if v and vk(v)>=[9,3]},key=vk); print(' '.join(sdks))")
 
           echo "Known iOS SDKs from map: ${ALL_KNOWN_SDKS}"
 
@@ -226,9 +226,9 @@ jobs:
           ref: ${{ github.ref }}
 
       # ── Step 2: Make script executable ───────────────────────────────────
-      - name: Ensure create_sdk.sh is executable
+      - name: Ensure build_sdk.sh is executable
         if: steps.release-check.outputs.already_released != 'true'
-        run: chmod +x "$GITHUB_WORKSPACE/create_sdk.sh"
+        run: chmod +x "$GITHUB_WORKSPACE/build_sdk.sh"
 
       # ── Step 3: Pre-clean ─────────────────────────────────────────────────
       - name: Remove any leftover local SDK directory
@@ -236,10 +236,10 @@ jobs:
         run: rm -rf "$GITHUB_WORKSPACE/iPhoneOS${IOS_VERSION}.sdk"
 
       # ── Step 4: Build ─────────────────────────────────────────────────────
-      - name: Run create_sdk.sh
+      - name: Run build_sdk.sh
         if: steps.release-check.outputs.already_released != 'true'
         working-directory: ${{ github.workspace }}
-        run: bash create_sdk.sh --ios "${IOS_VERSION}"
+        run: bash build_sdk.sh --ios "${IOS_VERSION}"
 
       # ── Step 5: Verify SDK directory ─────────────────────────────────────
       - name: Verify SDK was produced
