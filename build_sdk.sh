@@ -14,6 +14,7 @@
 # Usage: ./create_sdk.sh [OPTIONS]
 ################################################################################
 
+set -euo pipefail
 
 ################################################################################
 # Configuration & Global Variables
@@ -209,7 +210,6 @@ install_required_tools() {
     check_homebrew
 
     check_and_install_tool "unxip"  "brew install unxip"
-    check_and_install_tool "xcodes" "brew install xcodesorg/made/xcodes"
     check_and_install_tool "ipsw"   "brew install ipsw"
     check_and_install_tool "aria2c" "brew install aria2"
 
@@ -455,22 +455,66 @@ download_and_extract_xcode() {
         return 0
     fi
 
-    # ── 2. Download via xcodes ────────────────────────────────────────────────
-    # Major-version fuzzy matching is intentionally NOT done here: Xcode 26.0.1
-    # and 26.4 ship different iOS SDKs. An inexact match produces a wrong SDK.
-    log_info "Xcode ${XCODE_VERSION} not found locally — downloading..."
-    log_info "Downloading Xcode ${XCODE_VERSION} (this may take a while)..."
+    # ── 2. Resolve download URL from xcodereleases.com ───────────────────────
+    log_info "Resolving Xcode ${XCODE_VERSION} download URL..."
 
-    set +e
-    xcodes download --use-fastlane-auth "${XCODE_VERSION}" 
-	local xcodes_exit=$?
-    set -e
+    local xcode_url
+    xcode_url=$(python3 - "${XCODE_VERSION}" << 'PYEOF'
+import urllib.request, json, sys
+version = sys.argv[1]
+try:
+    with urllib.request.urlopen("https://xcodereleases.com/data.json", timeout=30) as r:
+        data = json.load(r)
+    for entry in data:
+        num = entry.get("version", {}).get("number", "")
+        if num == version or num.rstrip(".0") == version.rstrip(".0"):
+            url = entry.get("links", {}).get("download", {}).get("url", "")
+            if url:
+                print(url)
+                sys.exit(0)
+    sys.exit(1)
+except Exception as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+    ) || true
 
-    if [ "${xcodes_exit}" -ne 0 ]; then
-        log_warn "xcodes download failed for Xcode ${XCODE_VERSION} (exit ${xcodes_exit})."
-        log_warn "Skipping iOS SDK ${IOS_VERSION}."
+    if [ -z "${xcode_url}" ]; then
+        log_warn "Could not resolve URL for Xcode ${XCODE_VERSION} from xcodereleases.com"
+        log_warn "Download Xcode ${XCODE_VERSION} manually to ~/Downloads/ and re-run."
         return 1
     fi
+
+    log_info "URL: ${xcode_url}"
+
+    # ── 3. Download via aria2c (resume-capable, parallel streams) ────────────
+    local xcode_dl_dir="${HOME}/Downloads"
+    local xcode_filename
+    xcode_filename=$(basename "${xcode_url}")
+
+    log_info "Downloading via aria2c..."
+    set +e
+    aria2c \
+        --dir="${xcode_dl_dir}" \
+        --out="${xcode_filename}" \
+        --continue=true \
+        --max-tries=0 \
+        --retry-wait=10 \
+        --timeout=300 \
+        --connect-timeout=60 \
+        --split=8 \
+        --max-connection-per-server=8 \
+        --min-split-size=50M \
+        "${xcode_url}"
+    local aria2c_exit=$?
+    set -e
+
+    if [ "${aria2c_exit}" -ne 0 ]; then
+        log_error "aria2c download failed (exit ${aria2c_exit})"
+        log_warn  "Download Xcode ${XCODE_VERSION} manually to ~/Downloads/ and re-run."
+        return 1
+    fi
+    log_success "Xcode ${XCODE_VERSION} downloaded"
 
     # ── Locate the downloaded archive ─────────────────────────────────────────
     # Older Xcode releases (roughly ≤ 7.x) ship as a .dmg disk image;
@@ -1417,7 +1461,7 @@ REQUIREMENTS:
     - ~50 GB free disk space (more for --all)
     - Internet connection
 
-The script automatically installs: unxip, xcodes, ipsw, aria2
+The script automatically installs: unxip, ipsw, aria2
 
 KNOWN iOS SDK VERSIONS (read from sdk_map.json — run map_sdks.py to update):
 $(all_known_ios_sdks 2>/dev/null | tr '\n' '  ' || echo "  (run map_sdks.py to generate the map)")
