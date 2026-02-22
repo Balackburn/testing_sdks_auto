@@ -1,0 +1,102 @@
+name: Extract SDK from All Releases
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  extract-sdks:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Fetch all releases and extract SDKs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          echo "Fetching all releases for $REPO..."
+
+          PAGE=1
+          ALL_RELEASES="[]"
+
+          while true; do
+            RESPONSE=$(gh api \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/$REPO/releases?per_page=100&page=$PAGE")
+
+            COUNT=$(echo "$RESPONSE" | jq 'length')
+            ALL_RELEASES=$(echo "$ALL_RELEASES $RESPONSE" | jq -s 'add')
+
+            if [ "$COUNT" -lt 100 ]; then
+              break
+            fi
+
+            PAGE=$((PAGE + 1))
+          done
+
+          TOTAL=$(echo "$ALL_RELEASES" | jq 'length')
+          echo "Total releases: $TOTAL"
+
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "No releases found. Exiting."
+            exit 0
+          fi
+
+          echo "$ALL_RELEASES" | jq -c '.[]' | while read -r RELEASE; do
+            TAG=$(echo "$RELEASE" | jq -r '.tag_name')
+
+            ASSET_URL=$(echo "$RELEASE" | jq -r '
+              .assets[] | select(.name | endswith(".sdk.tar.xz")) | .url
+            ' | head -n 1)
+
+            ASSET_NAME=$(echo "$RELEASE" | jq -r '
+              .assets[] | select(.name | endswith(".sdk.tar.xz")) | .name
+            ' | head -n 1)
+
+            if [ -z "$ASSET_URL" ]; then
+              echo "No *.sdk.tar.xz asset in release $TAG. Skipping."
+              continue
+            fi
+
+            echo "Downloading $ASSET_NAME from $TAG..."
+
+            curl -fsSL \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/octet-stream" \
+              "$ASSET_URL" \
+              -o "/tmp/sdk_asset.tar.xz"
+
+            echo "Extracting into repo root..."
+            tar -xJf "/tmp/sdk_asset.tar.xz" -C "$GITHUB_WORKSPACE"
+            rm -f /tmp/sdk_asset.tar.xz
+
+            echo "Done with release: $TAG"
+          done
+
+      - name: Commit and push
+        run: |
+          cd "$GITHUB_WORKSPACE"
+
+          git add -A
+
+          if git diff --staged --quiet; then
+            echo "Nothing new to commit."
+            exit 0
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -m "ci: update SDKs from all releases [skip ci]"
+          git push origin HEAD
