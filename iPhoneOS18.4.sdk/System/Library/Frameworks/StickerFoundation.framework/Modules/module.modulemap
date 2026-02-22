@@ -1,6 +1,0 @@
-framework module StickerFoundation [system] {
-    umbrella header "StickerFoundation.h"
-    
-    export *
-    module * { export * }
-}

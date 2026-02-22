@@ -1,5 +1,0 @@
-framework module ShazamKit [system] {
-    umbrella header "ShazamKit.h"
-    export *
-    module * { export * }
-}

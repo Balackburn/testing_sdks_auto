@@ -1,4 +1,0 @@
-//
-//  ImagePlayground.h
-//  ImagePlayground
-//

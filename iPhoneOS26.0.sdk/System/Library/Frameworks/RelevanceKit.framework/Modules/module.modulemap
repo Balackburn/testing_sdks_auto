@@ -1,6 +1,0 @@
-framework module RelevanceKit {
-  umbrella header "RelevanceKit.h"
-  export *
-
-  module * { export * }
-}

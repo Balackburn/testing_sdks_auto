@@ -1,7 +1,0 @@
-framework module BackgroundAssets [system]
-{
-    umbrella header "BackgroundAssets.h"
-    module * { export * }
-    export *
-}
-

@@ -1,6 +1,0 @@
-framework module AlarmKit {
-  umbrella header "AlarmKit.h"
-  export *
-
-  module * { export * }
-}

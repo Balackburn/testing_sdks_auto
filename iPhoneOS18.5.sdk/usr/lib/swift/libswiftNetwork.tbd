@@ -1,9 +1,0 @@
---- !tapi-tbd
-tbd-version:     4
-targets:         [ arm64-ios, arm64e-ios ]
-install-name:    '/usr/lib/swift/libswiftNetwork.dylib'
-current-version: 4277.122.6
-reexported-libraries:
-  - targets:         [ arm64-ios, arm64e-ios ]
-    libraries:       [ '/System/Library/Frameworks/Network.framework/Network' ]
-...

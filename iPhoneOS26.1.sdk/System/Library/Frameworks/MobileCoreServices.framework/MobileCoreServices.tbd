@@ -1,9 +1,0 @@
---- !tapi-tbd
-tbd-version:     4
-targets:         [ arm64-ios, arm64e-ios ]
-install-name:    '/System/Library/Frameworks/MobileCoreServices.framework/MobileCoreServices'
-current-version: 1226
-reexported-libraries:
-  - targets:         [ arm64-ios, arm64e-ios ]
-    libraries:       [ '/System/Library/Frameworks/CoreServices.framework/CoreServices' ]
-...

@@ -1,5 +1,0 @@
-framework module ClockKit [system] {
-  umbrella header "ClockKit.h"
-  export *
-  module * { export * }
-}

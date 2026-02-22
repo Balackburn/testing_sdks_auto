@@ -1,5 +1,0 @@
-framework module BrowserKit [system] {
-    umbrella header "BrowserKit.h"
-    export *
-    module * { export * }
-}

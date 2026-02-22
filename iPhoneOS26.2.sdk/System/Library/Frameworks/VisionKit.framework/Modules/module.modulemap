@@ -1,5 +1,0 @@
-framework module VisionKit [system] {
-    umbrella header "VisionKit.h"
-    export *
-    module * { export * }
-}

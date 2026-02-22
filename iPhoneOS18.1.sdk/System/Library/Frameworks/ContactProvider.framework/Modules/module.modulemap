@@ -1,5 +1,0 @@
-framework module ContactProvider {
-  umbrella header "ContactProvider.h"
-  export *
-  module * { export * }
-}

@@ -1,6 +1,0 @@
-framework module AppMigrationKit {
-  umbrella header "AppMigrationKit.h"
-  export *
-
-  module * { export * }
-}

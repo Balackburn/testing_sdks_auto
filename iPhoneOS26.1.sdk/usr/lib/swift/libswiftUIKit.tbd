@@ -1,9 +1,0 @@
---- !tapi-tbd
-tbd-version:     4
-targets:         [ arm64-ios, arm64e-ios ]
-install-name:    '/usr/lib/swift/libswiftUIKit.dylib'
-current-version: 9126.1.12
-reexported-libraries:
-  - targets:         [ arm64-ios, arm64e-ios ]
-    libraries:       [ '/System/Library/Frameworks/UIKit.framework/UIKit' ]
-...

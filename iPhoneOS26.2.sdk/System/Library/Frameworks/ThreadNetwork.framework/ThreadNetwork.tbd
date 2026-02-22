@@ -1,8 +1,0 @@
---- !tapi-tbd
-tbd-version:     4
-targets:         [ arm64-ios, arm64e-ios ]
-install-name:    '/System/Library/Frameworks/ThreadNetwork.framework/ThreadNetwork'
-exports:
-  - targets:         [ arm64-ios, arm64e-ios ]
-    objc-classes:    [ THClient, THCredentials, THPreferredNetworkEntry ]
-...

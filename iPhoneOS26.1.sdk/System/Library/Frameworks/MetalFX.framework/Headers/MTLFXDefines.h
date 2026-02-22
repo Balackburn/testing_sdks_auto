@@ -1,7 +1,0 @@
-//
-//  MTLFXDefines.h
-//  MetalFX
-//
-//
-
-
